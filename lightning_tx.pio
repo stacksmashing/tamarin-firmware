@@ -1,0 +1,71 @@
+.program lightning_tx
+
+; 1 NOP is 0.5us
+
+SET PINS 1
+SET PINDIRS 1
+send:
+    ; Pull in one byte from OSR
+    PULL
+    ; Output counter (reg X)
+    SET X, 7
+
+continue_send:
+    ; Pull 1 bit from OSR
+    OUT Y 1
+
+    ; if Y is zero we send a (you guessed it) zero
+    JMP !Y send_zero
+
+    ; otherwise we send a 1
+send_one:
+    SET PINS 0 [3]
+    SET PINS 1 [11]
+    JMP send_done
+send_zero:
+    SET PINS 0 [13]
+    SET PINS 1 [2]
+send_done:
+    JMP X-- continue_send
+    NOP [14]
+    NOP [15]
+
+
+% c-sdk {
+static inline pio_sm_config lightning_tx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+
+
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin, 1u << pin);
+    //pio_sm_set_pindirs_with_mask(pio, sm, 1u << 19, 0u << pin);
+    pio_gpio_init(pio, 19);
+
+
+    pio_sm_config c = lightning_tx_program_get_default_config(offset);
+
+    // Map the state machine's OUT pin group to one pin, namely the `pin`
+    // parameter to this function.
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_in_pins(&c, pin);
+sm_config_set_jmp_pin(&c, pin);
+    //pio_sm_set_sideset_pins(pio, sm, 19);
+    //sm_config_set_sideset_pins(&c, 19);
+    sm_config_set_in_shift(&c, false, false, 32);
+    sm_config_set_out_shift(&c, true, false, 32);
+    
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, 19);
+    // Set the pin direction to output at the PIO
+    //pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    sm_config_set_clkdiv(&c, clkdiv);
+    
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+    // Set the state machine running
+    pio_sm_set_enabled(pio, sm, true);
+    return c;
+}
+%}

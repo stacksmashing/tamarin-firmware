@@ -1,0 +1,76 @@
+.program lightning_rx
+
+; 1 NOP is 0.5us
+
+.side_set 1 opt
+receive:
+
+    ; Set pin to input
+    SET PINDIRS 0 side 0
+    MOV ISR NULL
+
+receive_next_byte:
+    MOV ISR NULL
+    ; Set data counter
+    SET X 7
+
+data_loop:
+    ; Now we wait for the falling flank at the start of the bit
+    ; Then we wait 3us
+    WAIT 0 PIN 0 side 1 [5]
+    ; Read (inverted!!) bit
+    ; We wait 4us so we are at the position of either the finishing flank OR the stop bit
+    IN PINS 1 side 0 [7]
+    NOP
+    ; if this is NOT a stop bit we continue receive
+    JMP PIN continue_receive
+    ; if it IS a stop bit, we restart!
+    WAIT 1 PIN 0 side 1
+    NOP
+    JMP receive_next_byte side 0
+continue_receive:
+    WAIT 1 PIN 0 side 1
+    JMP X-- data_loop side 0
+
+; if we get here we have received 8 bits, time to push!
+    PUSH NOBLOCK
+    JMP receive_next_byte
+
+% c-sdk {
+static inline pio_sm_config lightning_rx_program_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+
+
+ //pio_sm_set_pins_with_mask(pio, sm, 1u << pin_rx, 1u << pin_rx);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << 19, 1u << 19);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << 19, 0u << pin);
+    pio_gpio_init(pio, 19);
+
+
+    pio_sm_config c = lightning_rx_program_get_default_config(offset);
+
+    // Map the state machine's OUT pin group to one pin, namely the `pin`
+    // parameter to this function.
+    //sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_in_pins(&c, pin);
+sm_config_set_jmp_pin(&c, pin);
+    //pio_sm_set_sideset_pins(pio, sm, 19);
+    sm_config_set_sideset_pins(&c, 19);
+    sm_config_set_in_shift(&c, false, false, 32);
+    sm_config_set_out_shift(&c, true, false, 32);
+    
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, 19);
+    // Set the pin direction to output at the PIO
+    //pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    sm_config_set_clkdiv(&c, clkdiv);
+    
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+    // Set the state machine running
+    pio_sm_set_enabled(pio, sm, true);
+    return c;
+}
+%}
