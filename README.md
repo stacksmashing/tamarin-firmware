@@ -14,14 +14,27 @@ make
 
 ![Pinout diagram](https://github.com/stacksmashing/tamarin-firmware/blob/main/media/pinout.png?raw=true)
 
-With this cable, connect: 
+With this cable, connect:
 
-- Purple to GPIO1
-- Orange to GPIO2
-- Black to any GND pin
-- Blue to GPIO3
-- Yellow to GPIO4
-- Red to 5V
+- [GPIO1] L1n (Purple)
+- [GPIO2] L1p (Orange)
+- [GND]   GND (Black)
+- [GPIO3] ID1 (Blue)
+- [GPIO4] ID0 (Yellow)
+- [5V]    5V  (Red)
+
+Note: The colors might be different for your cable. I recommend checking the pinout using a voltmeter.
+
+![Lightning](https://github.com/stacksmashing/tamarin-firmware/blob/main/media/lightning.png?raw=true)
+
+Another cable was observed to have the following pinout:
+
+- [GPIO1] L1n (Green)
+- [GPIO2] L1p (White)
+- [GND]   GND (Black)
+- [GPIO3] ID1 (Orange)
+- [GPIO4] ID0 (Red)
+- [5V]    5V  (Yellow)
 
 ## Usage
 
