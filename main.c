@@ -25,10 +25,6 @@
 
 #define PIN_SDQ 3
 
-// Used to initialize picoprobe
-volatile bool probe_active = 0;
-volatile bool probe_initialized = 0;
-
 volatile bool serialEnabled = false;
 
 void configure_rx(PIO pio, uint sm) {
@@ -43,20 +39,23 @@ void leave_dcsd() {
     serialEnabled = false;
 }
 
-void tamarin_reset_tristar(PIO pio, uint sm) {
-    leave_dcsd();
+void lightning_send_wake() {
+    gpio_init(PIN_SDQ);
+    gpio_set_dir(PIN_SDQ, GPIO_OUT);
+    gpio_put(PIN_SDQ, 0);
     
-    // All pins connected to shell (GND) means cable is currently being inserted
-    for (int i = 0; i < 4; i++) {
-        gpio_init(i);
-        gpio_set_dir(i, GPIO_OUT);
-        gpio_put(i, 0);
-    }
+    sleep_us(20);
+    
+    gpio_set_dir(PIN_SDQ, GPIO_IN);
     
     sleep_us(1000);
-    for (int i = 0; i < 4; i++) {
-        gpio_set_dir(i, GPIO_IN);
-    }
+}
+
+void tamarin_reset_tristar(PIO pio, uint sm) {
+    tamarin_probe_deinit();
+    leave_dcsd();
+    
+    lightning_send_wake();
     
     configure_rx(pio, sm);
 }
@@ -73,6 +72,10 @@ enum state {
     WAITING_FOR_INIT,
     READING_TRISTAR_REQUEST,
     HANDLE_TRISTAR_REQUEST,
+    HANDLE_JTAG,
+    // Force JTAG mode if the cable is already in JTAG mode
+    // (e.g. after the tamarin cable was reset but not the device)
+    FORCE_JTAG
 };
 
 volatile enum state gState = RESTART_ENUMERATION;
@@ -142,14 +145,13 @@ void dcsd_mode(PIO pio, uint sm) {
 }
 
 void jtag_mode(PIO pio, uint sm) {
-    // wait a second for this to be settled, then switch to high-z for JeTAG
-    sleep_ms(500);
     set_idbus_high_impedance();
     pio_sm_set_enabled(pio, sm, false);
-    probe_active = true;
+    tamarin_probe_init();
     serprint("JTAG mode active, ID pin in Hi-Z.\r\n");
     serprint("You can now connect with an SWD debugger.\r\n");
-    while(1) {}
+    serprint("Please note: Reset/Reset to DFU will be unavailable until\r\n");
+    serprint("the device is rebooted or the cable is re-plugged.\r\n");
 }
 
 void respond_lightning(PIO pio, uint sm, const uint8_t *data, size_t data_length) {
@@ -224,8 +226,8 @@ void output_state_machine() {
                                 
                             case DEFAULT_CMD_JTAG:
                                 respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 8);
-                                jtag_mode(pio, sm);
-                                break;
+                                gState = FORCE_JTAG;
+                                continue;
                         }
                         break;
                     case CMD_RESET:
@@ -252,16 +254,27 @@ void output_state_machine() {
                 gState = WAITING_FOR_INIT;
                 configure_rx(pio, sm);
                 break;
+                
+            case HANDLE_JTAG:
+                tamarin_probe_task();
+                break;
+                
+            case FORCE_JTAG:
+                jtag_mode(pio, sm);
+                dcsd_mode(pio, sm); // Also init serial
+                gState = HANDLE_JTAG;
+                break;
         }
     }
 }
 
 void print_menu() {
     serprint("Good morning!\r\n\r\n");
-    serprint("1: JTAG mode [currently unavailable]\r\n");
+    serprint("1: JTAG mode\r\n");
     serprint("2: DCSD mode\r\n");
     serprint("3: Reset device\r\n");
     serprint("4: Reset and enter DFU mode\r\n");
+    serprint("F: Force JTAG mode without sending command\r\n");
     serprint("R: Reset Tamarin cable\r\n");
     serprint("> ");
 }
@@ -271,11 +284,10 @@ void shell_task() {
         char c = tud_cdc_n_read_char(ITF_CONSOLE);
         switch(c) {
             case '1':
-                /*serprint("\r\nEnabling JTAG mode.\r\n");
+                serprint("\r\nEnabling JTAG mode.\r\n");
                 gCommand = CMD_DEFAULT;
                 gDefaultCommand = DEFAULT_CMD_JTAG;
-                gState = RESTART_ENUMERATION;*/
-                serprint("\r\nJTAG mode not yet available!\r\n");
+                gState = RESTART_ENUMERATION;
                 break;
             case '2':
                 serprint("\r\nEnabling DCSD mode.\r\n");
@@ -293,6 +305,12 @@ void shell_task() {
                 gCommand = CMD_AUTO_DFU;
                 gState = RESTART_ENUMERATION;
                 break;
+            case 'f':
+            case 'F':
+                serprint("\r\nForcing JTAG mode.\r\n");
+                gDefaultCommand = DEFAULT_CMD_JTAG;
+                gState = FORCE_JTAG;
+                break;
             case 'R':
             case 'r':
                 watchdog_enable(100, 1);
@@ -304,30 +322,17 @@ void shell_task() {
     }
 }
 
-
 int main() {
     board_init();
     tusb_init();
-    
-    uart_init(uart1, 115200);
-    gpio_set_function(8, GPIO_FUNC_UART);
-    gpio_set_function(9, GPIO_FUNC_UART);
 
     multicore_launch_core1(output_state_machine);
     
-    probe_active = false;
     while(1) {
         tud_task();
         shell_task();
-        if(probe_active) {
-            if(!probe_initialized) {
-                tamarin_probe_init();
-                tud_task();
-                probe_initialized = 1;
-            }
-            tamarin_probe_task();
-        }
         
+        // Handle serial
         if (serialEnabled) {
             if (uart_is_readable(uart0)) {
                 tud_cdc_n_write_char(ITF_DCSD, uart_getc(uart0));

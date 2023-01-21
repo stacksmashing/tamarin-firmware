@@ -18,6 +18,8 @@
 #include "tusb.h"
 #include "util.h"
 
+// Disable all prints for now
+#define serprint(...)
 
 enum TAMARIN_CMDS {
     TAMARIN_INVALID      = 0, // Invalid command
@@ -153,6 +155,12 @@ void tamarin_probe_init() {
     probe_set_swclk_freq(1000);
 
     tamarin_start_probe();
+}
+
+void tamarin_probe_deinit() {
+    pio_sm_set_enabled(pio0, PROBE_SM, false);
+    pio_clear_instruction_memory(pio0);
+    gpio_disable_pulls(PROBE_PIN_SWDIO);
 }
 
 int __not_in_flash_func(tamarin_tx_read_bare)(uint8_t request, uint32_t *value);

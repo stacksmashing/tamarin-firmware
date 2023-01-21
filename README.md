@@ -1,12 +1,6 @@
 # Tamarin Firmware
 ![Tamarin Logo](https://github.com/stacksmashing/tamarin-firmware/blob/main/media/tamarin-logo-300.png?raw=true)
 
-## About this fork
-
-This fork fixes various bugs in the Tamarin Firmware to make it actually usable. However, it currently does not support JTAG/SWD, only UART, Reset and Reset to DFU.
-
-UART is enabled automatically when a device is connected.
-
 ## Build
 
 ```
@@ -66,3 +60,8 @@ Once the phone is successfully demoted the [bonobo configs](https://github.com/l
 ```
 openocd -f interface/tamarin.cfg -f t8015.cfg
 ```
+
+## Known issues
+
+1. Commands are unavailable in JTAG mode. Workaround: Enter the desired command and then reconnect the device. To reset the device you can also use JTAG.
+2. JTAG is not re-enabled after manual device reset. Workaround: Run the JTAG command again, then reconnect the device (or the Tamarin cable).
