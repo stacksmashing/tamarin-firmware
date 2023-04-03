@@ -6,13 +6,13 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-
 #include "pico/stdio.h"
 #include "pico/multicore.h"
 
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
 #include "hardware/timer.h"
+#include "hardware/watchdog.h"
 
 #include "lightning_rx.pio.h"
 #include "lightning_tx.pio.h"
@@ -23,13 +23,42 @@
 #include "tamarin_probe.h"
 #include "util.h"
 
-
 #define PIN_SDQ 3
 
-// Used to initialize picoprobe
-volatile bool probe_active = 0;
-volatile bool probe_initialized = 0;
+volatile bool serialEnabled = false;
 
+void configure_rx(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_clear_instruction_memory(pio);
+    uint offset = pio_add_program(pio, &lightning_rx_program);
+    pio_sm_config c = lightning_rx_program_init(pio, sm, offset, PIN_SDQ, 125.0/2.0);
+}
+
+void leave_dcsd() {
+    uart_deinit(uart0);
+    serialEnabled = false;
+}
+
+void lightning_send_wake() {
+    gpio_init(PIN_SDQ);
+    gpio_set_dir(PIN_SDQ, GPIO_OUT);
+    gpio_put(PIN_SDQ, 0);
+    
+    sleep_us(20);
+    
+    gpio_set_dir(PIN_SDQ, GPIO_IN);
+    
+    sleep_us(1000);
+}
+
+void tamarin_reset_tristar(PIO pio, uint sm) {
+    tamarin_probe_deinit();
+    leave_dcsd();
+    
+    lightning_send_wake();
+    
+    configure_rx(pio, sm);
+}
 
 unsigned char reverse_byte(unsigned char b) {
    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
@@ -39,21 +68,38 @@ unsigned char reverse_byte(unsigned char b) {
 }
 
 enum state {
-    IDLE,
+    RESTART_ENUMERATION,
     WAITING_FOR_INIT,
     READING_TRISTAR_REQUEST,
     HANDLE_TRISTAR_REQUEST,
+    HANDLE_JTAG,
+    // Force JTAG mode if the cable is already in JTAG mode
+    // (e.g. after the tamarin cable was reset but not the device)
+    FORCE_JTAG
 };
 
+volatile enum state gState = RESTART_ENUMERATION;
+
 enum command {
-    CMD_JTAG = 0,
-    CMD_DCSD,
+    CMD_DEFAULT,
     CMD_RESET,
     CMD_AUTO_DFU,
     // Used as 'second stage' for the DFU command. Saves us a state machine.
     CMD_INTERNAL_AUTO_DFU_2,
     CMD_MAX,
 };
+
+enum default_command {
+    DEFAULT_CMD_DCSD = 0,
+    DEFAULT_CMD_JTAG
+};
+
+// Command that should be sent automatically (on reboot, plugin, etc.)
+// Automatically changed when selecting DCSD/JTAG
+enum default_command gDefaultCommand = DEFAULT_CMD_DCSD;
+
+// Next command to send
+enum command gCommand = CMD_DEFAULT;
 
 enum responses {
     // JTAG mode
@@ -71,9 +117,9 @@ enum responses {
 // hex(pwnlib.util.crc.generic_crc(b"\x75\x00\x00\x02\x00\x00\x00", 0x31, 8, 0xff, True, True, False))
 const uint8_t bootloader_response[RSP_MAX][8] = {
     [RSP_USB_UART_JTAG] = {0x75, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40},
-    [RSP_USB_UART] = {0x75, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa},
+    [RSP_USB_UART] = {0x75, 0x20, 0x00, 0x10, 0x00, 0x00, 0x00, 0x92},
     [RSP_RESET] = {0x75, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x83},
-    [RSP_DFU] = {0x75, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x1b},
+    [RSP_DFU] = {0x75, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00, 0xad},
 };
 
 void set_idbus_high_impedance() {
@@ -94,25 +140,18 @@ void dcsd_mode(PIO pio, uint sm) {
     serprint("DCSD mode active.\r\n");
     serprint("Connect to the second serial port of the\r\n");
     serprint("Tamarin Cable to access the monitor.\r\n");
-    while(1) {
-        if(uart_is_readable(uart0)) {
-            tud_cdc_n_write_char(ITF_DCSD, uart_getc(uart0));
-        }
-        if(tud_cdc_n_available(ITF_DCSD)) {
-            uart_putc_raw(uart0, tud_cdc_n_read_char(ITF_DCSD));
-        }
-    }
+    
+    serialEnabled = true;
 }
 
 void jtag_mode(PIO pio, uint sm) {
-    // wait a second for this to be settled, then switch to high-z for JeTAG
-    sleep_ms(500);
     set_idbus_high_impedance();
     pio_sm_set_enabled(pio, sm, false);
-    probe_active = true;
+    tamarin_probe_init();
     serprint("JTAG mode active, ID pin in Hi-Z.\r\n");
     serprint("You can now connect with an SWD debugger.\r\n");
-    while(1) {}
+    serprint("Please note: Reset/Reset to DFU will be unavailable until\r\n");
+    serprint("the device is rebooted or the cable is re-plugged.\r\n");
 }
 
 void respond_lightning(PIO pio, uint sm, const uint8_t *data, size_t data_length) {
@@ -123,102 +162,108 @@ void respond_lightning(PIO pio, uint sm, const uint8_t *data, size_t data_length
     for(size_t i=0; i < data_length; i++) {
         pio_sm_put_blocking(pio, sm, data[i]);
     }
-}
-
-void configure_rx(PIO pio, uint sm) {
-    pio_clear_instruction_memory(pio);
-    uint offset = pio_add_program(pio, &lightning_rx_program);
-    pio_sm_config c = lightning_rx_program_init(pio, sm, offset, PIN_SDQ, 125.0/2.0);
+    while (!pio_sm_is_tx_fifo_empty(pio, sm)) {
+        sleep_us(500);
+    }
 }
 
 void output_state_machine() {
     PIO pio = pio1;
     uint sm = pio_claim_unused_sm(pio, true);
-    configure_rx(pio, sm);
 
     uint8_t i = 0;
     uint8_t buf[4];
 
-    // This is what DCSD receives before it answers.
-    // Retrieved via logic analyzer.
-    const uint8_t bootloader_command[4] = {
-        0x74, 0x00, 0x07, 0x20
-    };
-
-    enum state state = IDLE;
-    enum command op;
     uint32_t value, value_b;
     while(1) {
-        switch(state) {
-            case IDLE:
-                op = multicore_fifo_pop_blocking();
-                state = WAITING_FOR_INIT;
+        switch(gState) {
+            case RESTART_ENUMERATION:
+                serprint("Restarting enumeration!\r\n");
+                tamarin_reset_tristar(pio, sm);
+                serprint("Done restarting enumeration!\r\n");
+                gState = WAITING_FOR_INIT;
                 break;
+                
             case WAITING_FOR_INIT:
+                if (pio_sm_is_rx_fifo_empty(pio, sm)) break;
                 value = pio_sm_get_blocking(pio, sm);
                 value_b = reverse_byte(value & 0xFF);
 
                 if(value_b == 0x74) {
-                    serprint("Tristar request received...\r\n");
-                    state = READING_TRISTAR_REQUEST;
+                    leave_dcsd();
+                    gState = READING_TRISTAR_REQUEST;
                     buf[0] = value_b;
                     i = 1;
+                } else {
+                    serprint("Tristar >> 0x%x (unknown, ignoring)\r\n", value_b);
                 }
+                
+                sleep_us(100); // Breaks without this...
+                
                 break;
             case READING_TRISTAR_REQUEST:
+                if (pio_sm_is_rx_fifo_empty(pio, sm)) break;
                 value = pio_sm_get_blocking(pio, sm);
                 value_b = reverse_byte(value & 0xFF);
 
                 buf[i++] = value_b;
                 if(i == 4) {
-                    // if(memcmp(buf, bootloader_command, 4) == 0) {
-                        state = HANDLE_TRISTAR_REQUEST;
-                    // } else {
-                    //     state = WAITING_FOR_INIT;
-                    //     i = 0;
-                    // }
+                    gState = HANDLE_TRISTAR_REQUEST;
+                    i = 0;
                 }
+                
+                sleep_us(100); // Breaks without this...
+                
                 break;
             case HANDLE_TRISTAR_REQUEST:
-                switch(op) {
-                    case CMD_JTAG:
-                        respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 8);
-                        jtag_mode(pio, sm);
-                        break;
-                    case CMD_DCSD:
-                        respond_lightning(pio, sm, bootloader_response[RSP_USB_UART], 8);
-                        dcsd_mode(pio, sm);
+                switch(gCommand) {
+                    case CMD_DEFAULT:
+                        switch (gDefaultCommand) {
+                            case DEFAULT_CMD_DCSD:
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART], 8);
+                                dcsd_mode(pio, sm);
+                                break;
+                                
+                            case DEFAULT_CMD_JTAG:
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 8);
+                                gState = FORCE_JTAG;
+                                continue;
+                        }
                         break;
                     case CMD_RESET:
                         respond_lightning(pio, sm, bootloader_response[RSP_RESET], 8);
-                        serprint("Resetting device!\r\n");
                         sleep_us(1000);
-                        // op = CMD_INTERNAL_AUTO_DFU_2;
-                        state = IDLE;
-                        // Put SDQ back into receiving mode
-                        configure_rx(pio, sm);
+                        gCommand = CMD_DEFAULT;
                         break;
                     case CMD_AUTO_DFU:
                         respond_lightning(pio, sm, bootloader_response[RSP_RESET], 8);
                         // Measured with logic analyzer
                         sleep_us(900);
-                        serprint("Resetting device!\r\n");
-                        // We wait for the next enumeration, then we send the DFU command
-                        op = CMD_INTERNAL_AUTO_DFU_2;
-                        state = WAITING_FOR_INIT;
-                        // Put SDQ back into receiving mode
-                        configure_rx(pio, sm);
+                        gCommand = CMD_INTERNAL_AUTO_DFU_2;
                         break;
                     case CMD_INTERNAL_AUTO_DFU_2:
                         respond_lightning(pio, sm, bootloader_response[RSP_DFU], 8);
                         serprint("Device should now be in DFU mode.\r\n");
-                        while(1) {}
                         break;
                     default:
                         serprint("UNKNOWN MODE. Send help. Locking up.\r\n");
                         while(1) {}
                         break;
                 }
+                
+                gState = WAITING_FOR_INIT;
+                configure_rx(pio, sm);
+                break;
+                
+            case HANDLE_JTAG:
+                tamarin_probe_task();
+                break;
+                
+            case FORCE_JTAG:
+                jtag_mode(pio, sm);
+                dcsd_mode(pio, sm); // Also init serial
+                gState = HANDLE_JTAG;
+                break;
         }
     }
 }
@@ -229,97 +274,74 @@ void print_menu() {
     serprint("2: DCSD mode\r\n");
     serprint("3: Reset device\r\n");
     serprint("4: Reset and enter DFU mode\r\n");
+    serprint("F: Force JTAG mode without sending command\r\n");
     serprint("R: Reset Tamarin cable\r\n");
     serprint("> ");
 }
 
-void print_small_menu() {
-    serprint("R: Reset Tamarin cable\r\n");
-    serprint("> ");
-}
-
-enum SHELL_STATE {
-    READY,
-    BLOCKED
-};
-
-enum SHELL_STATE shell_state;
-#define AIRCR_Register (*((volatile uint32_t*)(PPB_BASE + 0x0ED0C)))
 void shell_task() {
-    switch(shell_state) {
-        case READY:
-            if(tud_cdc_n_available(ITF_CONSOLE)) {
-                char c = tud_cdc_n_read_char(ITF_CONSOLE);
-                switch(c) {
-                    case '1':
-                        serprint("\r\nEnabling JTAG mode.\r\n");
-                        multicore_fifo_push_blocking(CMD_JTAG);
-                        shell_state = BLOCKED;
-                        break;
-                    case '2':
-                        serprint("\r\nEnabling DCSD mode.\r\n");
-                        multicore_fifo_push_blocking(CMD_DCSD);
-                        shell_state = BLOCKED;
-                        break;
-                    case '3':
-                        serprint("\r\nResetting.\r\n");
-                        multicore_fifo_push_blocking(CMD_RESET);
-                        // shell_state = BLOCKED;
-                        break;
-                    case '4':
-                        serprint("\r\nEnabling DFU mode.\r\n");
-                        multicore_fifo_push_blocking(CMD_AUTO_DFU);
-                        // shell_state = BLOCKED;
-                        break;
-                    case 'R':
-                        // set SYSRESETREQ
-                        AIRCR_Register = 0x05FA0004;
-                        break;
-                    default:
-                        print_menu();
-                        break;
-                }
-            }
-            break;
-        case BLOCKED:
-            if(tud_cdc_n_available(ITF_CONSOLE)) {
-                char c = tud_cdc_n_read_char(ITF_CONSOLE);
-                switch(c) {
-                    case 'R':
-                        // set SYSRESETREQ
-                        AIRCR_Register = 0x05FA0004;
-                        break;
-                    default:
-                        print_small_menu();
-                        break;
-                }
-            }
-            break;
+    if (tud_cdc_n_available(ITF_CONSOLE)) {
+        char c = tud_cdc_n_read_char(ITF_CONSOLE);
+        switch(c) {
+            case '1':
+                serprint("\r\nEnabling JTAG mode.\r\n");
+                gCommand = CMD_DEFAULT;
+                gDefaultCommand = DEFAULT_CMD_JTAG;
+                gState = RESTART_ENUMERATION;
+                break;
+            case '2':
+                serprint("\r\nEnabling DCSD mode.\r\n");
+                gCommand = CMD_DEFAULT;
+                gDefaultCommand = DEFAULT_CMD_DCSD;
+                gState = RESTART_ENUMERATION;
+                break;
+            case '3':
+                serprint("\r\nResetting.\r\n");
+                gCommand = CMD_RESET;
+                gState = RESTART_ENUMERATION;
+                break;
+            case '4':
+                serprint("\r\nEnabling DFU mode.\r\n");
+                gCommand = CMD_AUTO_DFU;
+                gState = RESTART_ENUMERATION;
+                break;
+            case 'f':
+            case 'F':
+                serprint("\r\nForcing JTAG mode.\r\n");
+                gDefaultCommand = DEFAULT_CMD_JTAG;
+                gState = FORCE_JTAG;
+                break;
+            case 'R':
+            case 'r':
+                watchdog_enable(100, 1);
+                break;
+            default:
+                print_menu();
+                break;
+        }
     }
 }
-
 
 int main() {
     board_init();
     tusb_init();
-    // Initialize state variables
-    shell_state = READY;
 
     multicore_launch_core1(output_state_machine);
     
-    // set_idbus_high_impedance();
-    // pio_sm_set_enabled(pio, sm, false);
-    probe_active = false;
     while(1) {
         tud_task();
         shell_task();
-        if(probe_active) {
-            if(!probe_initialized) {
-                tamarin_probe_init();
-                tud_task();
-                probe_initialized = 1;
+        
+        // Handle serial
+        if (serialEnabled) {
+            if (uart_is_readable(uart0)) {
+                tud_cdc_n_write_char(ITF_DCSD, uart_getc(uart0));
+                tud_cdc_n_write_flush(ITF_DCSD);
             }
-            tamarin_probe_task();
+            
+            if (tud_cdc_n_available(ITF_DCSD)) {
+                uart_putc_raw(uart0, tud_cdc_n_read_char(ITF_DCSD));
+            }
         }
     }
 }

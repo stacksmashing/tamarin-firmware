@@ -16,12 +16,12 @@ make
 
 With this cable, connect:
 
-- [GPIO1] L1n (Purple)
-- [GPIO2] L1p (Orange)
-- [GND]   GND (Black)
-- [GPIO3] ID1 (Blue)
-- [GPIO4] ID0 (Yellow)
-- [5V]    5V  (Red)
+- [GP0] L1n (Purple)
+- [GP1] L1p (Orange)
+- [GND] GND (Black)
+- [GP2] ID1 (Blue)
+- [GP3] ID0 (Yellow)
+- [5V]  5V  (Red)
 
 Note: The colors might be different for your cable. I recommend checking the pinout using a voltmeter.
 
@@ -29,12 +29,17 @@ Note: The colors might be different for your cable. I recommend checking the pin
 
 Another cable was observed to have the following pinout:
 
-- [GPIO1] L1n (Green)
-- [GPIO2] L1p (White)
-- [GND]   GND (Black)
-- [GPIO3] ID1 (Orange)
-- [GPIO4] ID0 (Red)
-- [5V]    5V  (Yellow)
+- [GP0] L1n (Green)
+- [GP1] L1p (White)
+- [GND] GND (Black)
+- [GP2] ID1 (Orange)
+- [GP3] ID0 (Red)
+- [5V]  5V  (Yellow)
+
+If you would like to connect to your device over USB, cut a USB cable and connect its wires like this:
+- USB cable D+ (green)  -> L0p (color depends on your cable)
+- USB cable D- (white)  -> L0n (color depends on your cable)
+- USB cable GND (black) -> GND
 
 ## Usage
 
@@ -55,3 +60,8 @@ Once the phone is successfully demoted the [bonobo configs](https://github.com/l
 ```
 openocd -f interface/tamarin.cfg -f t8015.cfg
 ```
+
+## Known issues
+
+1. Commands are unavailable in JTAG mode. Workaround: Enter the desired command and then reconnect the device. To reset the device you can also use JTAG.
+2. JTAG is not re-enabled after manual device reset. Workaround: Run the JTAG command again, then reconnect the device (or the Tamarin cable).

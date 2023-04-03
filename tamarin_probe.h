@@ -29,5 +29,6 @@
 
 void tamarin_probe_task(void);
 void tamarin_probe_init(void);
+void tamarin_probe_deinit(void);
 
 #endif
