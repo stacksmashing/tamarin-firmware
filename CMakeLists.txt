@@ -14,6 +14,9 @@ add_executable(tamarin_firmware)
 #   PUBLIC PICO_STDIO_DEFAULT_CRLF=0
 # )
 
+target_compile_options(tamarin_firmware INTERFACE -DPICO_ENTER_USB_BOOT_ON_EXIT=1)
+
+
 pico_generate_pio_header(tamarin_firmware ${CMAKE_CURRENT_LIST_DIR}/lightning_tx.pio)
 pico_generate_pio_header(tamarin_firmware ${CMAKE_CURRENT_LIST_DIR}/lightning_rx.pio)
 pico_generate_pio_header(tamarin_firmware ${CMAKE_CURRENT_LIST_DIR}/probe.pio)

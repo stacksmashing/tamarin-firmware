@@ -28,7 +28,7 @@ send_zero:
 send_done:
     JMP X-- continue_send
     NOP [14]
-    NOP [15]
+    PUSH [15]
 
 
 % c-sdk {
@@ -51,7 +51,10 @@ static inline pio_sm_config lightning_tx_program_init(PIO pio, uint sm, uint off
 sm_config_set_jmp_pin(&c, pin);
     //pio_sm_set_sideset_pins(pio, sm, 19);
     //sm_config_set_sideset_pins(&c, 19);
+
+    // shift_right = false, auto_push = false
     sm_config_set_in_shift(&c, false, false, 32);
+    // shift_right = true, auto_pull = false
     sm_config_set_out_shift(&c, true, false, 32);
     
     // Set this pin's GPIO function (connect PIO to the pad)
