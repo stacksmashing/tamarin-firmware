@@ -23,6 +23,7 @@
 
 #include "tamarin_probe.h"
 #include "util.h"
+#include "crc.h"
 
 #define PIN_SDQ 3
 
@@ -128,12 +129,12 @@ enum TRISTAR_REQUESTS {
 
 // To generate CRCs:
 // hex(pwnlib.util.crc.generic_crc(b"\x75\x00\x00\x02\x00\x00\x00", 0x31, 8, 0xff, True, True, False))
-const uint8_t bootloader_response[RSP_MAX][8] = {
-    [RSP_USB_UART_JTAG] = {0x75, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40},
-    [RSP_USB_UART] = {0x75, 0x20, 0x00, 0x10, 0x00, 0x00, 0x00, 0x92},
-    [RSP_RESET] = {0x75, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x83},
-    [RSP_DFU] = {0x75, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00, 0xad},
-    [RSP_USB_A_CHARGING_CABLE] = {0x75, 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x66},
+const uint8_t bootloader_response[RSP_MAX][7] = {
+    [RSP_USB_UART_JTAG] = {0x75, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00},
+    [RSP_USB_UART] = {0x75, 0x20, 0x00, 0x10, 0x00, 0x00, 0x00},
+    [RSP_RESET] = {0x75, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00},
+    [RSP_DFU] = {0x75, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00},
+    [RSP_USB_A_CHARGING_CABLE] = {0x75, 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00},
 };
 
 void set_idbus_high_impedance() {
@@ -168,22 +169,39 @@ void jtag_mode(PIO pio, uint sm) {
     serprint("the device is rebooted or the cable is re-plugged.\r\n");
 }
 
+uint8_t crc_data(const uint8_t *data, size_t len) {
+    crc_t crc = crc_init();
+    crc = crc_update(crc, data, len);
+    crc = crc_finalize(crc);
+    return crc;
+}
+
 void respond_lightning(PIO pio, uint sm, const uint8_t *data, size_t data_length) {
+    // Static buffer
+    static uint8_t response_buffer[64];
+    if(data_length > 63) {
+        serprint("Lightning response too large, not sending.\r\n");
+        return;
+    }
+    memcpy(response_buffer, data, data_length);
+    response_buffer[data_length] = crc_data(data, data_length);
+
     pio_sm_set_enabled(pio, sm, false);
     pio_clear_instruction_memory(pio);
     uint offset = pio_add_program(pio, &lightning_tx_program);
     pio_sm_config c = lightning_tx_program_init(pio, sm, offset, PIN_SDQ, 125.0/2.0);
     // We fill in 1 byte first, then the second byte, only then do we start to do
     // "get_blocking" to avoid the state machine ever running empty.
-    pio_sm_put_blocking(pio, sm, data[0]);
-    for(size_t i=1; i < data_length; i++) {
-        pio_sm_put_blocking(pio, sm, data[i]);
+    pio_sm_put_blocking(pio, sm, response_buffer[0]);
+    for(size_t i=1; i < data_length+1; i++) {
+        pio_sm_put_blocking(pio, sm, response_buffer[i]);
         pio_sm_get_blocking(pio, sm);
     }
     pio_sm_get_blocking(pio, sm);
 }
 
 void output_state_machine() {
+    char DFU[8];
     PIO pio = pio1;
     uint sm = pio_claim_unused_sm(pio, true);
 
@@ -248,7 +266,7 @@ void output_state_machine() {
                 sleep_us(10); // Breaks without this...
                 break;
             case HANDLE_TRISTAR_UNKNOWN_76:
-                respond_lightning(pio, sm, "\x77\x02\x01\x02\x80\x60\x01\x39\x3a\x44\x3e\xc9", 12);
+                respond_lightning(pio, sm, "\x77\x02\x01\x02\x80\x60\x01\x39\x3a\x44\x3e\xc9", 11);
                 serprint("76 request received: %02X %02X\r\n", buf[0], buf[1]);
                 gState = WAITING_FOR_INIT;
                 break;
@@ -267,7 +285,7 @@ void output_state_machine() {
                 
                 break;
             case HANDLE_POWER_REQUEST:
-                respond_lightning(pio, sm, "\x71\x93", 2);
+                respond_lightning(pio, sm, "\x71\x93", 1);
                 serprint("Power request received: %02X %02X %02X %02X\r\n", buf[0], buf[1], buf[2], buf[3]);
                 gState = WAITING_FOR_INIT;
                 break;
@@ -277,34 +295,32 @@ void output_state_machine() {
                     case CMD_DEFAULT:
                         switch (gDefaultCommand) {
                             case DEFAULT_CMD_DCSD:
-                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART], 8);
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART], 7);
                                 dcsd_mode(pio, sm);
                                 break;
                                 
                             case DEFAULT_CMD_JTAG:
-                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 8);
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 7);
                                 gState = FORCE_JTAG;
                                 continue;
                             case DEFAULT_CMD_CHARGING:
-                                respond_lightning(pio, sm, bootloader_response[RSP_USB_A_CHARGING_CABLE], 8);
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_A_CHARGING_CABLE], 7);
                                 serprint("Sent charging\r\n");
                                 gState = WAITING_FOR_INIT;
                                 break;
                         }
                         break;
                     case CMD_RESET:
-                        respond_lightning(pio, sm, bootloader_response[RSP_RESET], 8);
+                        respond_lightning(pio, sm, bootloader_response[RSP_RESET], 7);
                         sleep_us(1000);
                         gCommand = CMD_DEFAULT;
                         break;
                     case CMD_AUTO_DFU:
-                        respond_lightning(pio, sm, bootloader_response[RSP_RESET], 8);
-                        // Measured with logic analyzer
-                        sleep_us(900);
+                        respond_lightning(pio, sm, bootloader_response[RSP_RESET], 7);
                         gCommand = CMD_INTERNAL_AUTO_DFU_2;
                         break;
                     case CMD_INTERNAL_AUTO_DFU_2:
-                        respond_lightning(pio, sm, bootloader_response[RSP_DFU], 8);
+                        respond_lightning(pio, sm, bootloader_response[RSP_DFU], 7);
                         serprint("Device should now be in DFU mode.\r\n");
                         gCommand = CMD_DEFAULT;
                         break;
@@ -336,8 +352,8 @@ void print_menu() {
     serprint("1: JTAG mode\r\n");
     serprint("2: DCSD mode\r\n");
     serprint("3: Reset device\r\n");
-    serprint("4: Reset and enter DFU mode\r\n");
-    serprint("5: Reenumerate\r\n");
+    serprint("4: Reset and enter DFU mode (iPhone X and up only)\r\n");
+    serprint("5: Reenumerate\r\n\r\n");
     serprint("F: Force JTAG mode without sending command\r\n");
     serprint("R: Reset Tamarin cable\r\n");
     serprint("U: Go into firmware update mode\r\n");

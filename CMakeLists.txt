@@ -29,6 +29,7 @@ target_sources(tamarin_firmware PRIVATE
         main.c
         usb_descriptors.c
         util.c
+        crc.c
         )
 
 target_link_libraries(tamarin_firmware PRIVATE pico_stdlib tinyusb_device tinyusb_board pico_stdio hardware_i2c pico_multicore pico_time pico_sync hardware_pio)
