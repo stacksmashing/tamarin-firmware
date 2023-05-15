@@ -1,6 +1,12 @@
 # Tamarin Firmware
 ![Tamarin Logo](https://github.com/stacksmashing/tamarin-firmware/blob/main/media/tamarin-logo-300.png?raw=true)
 
+## PICO SDK NOTE
+
+Please build with the Pico-SDK Version 4fe995d0ec984833a7ea9c33bac5c67a63c04178
+
+Newer versions have some USB incompatibility.
+
 ## Build
 
 ```
