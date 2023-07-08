@@ -27,7 +27,7 @@ With this cable, connect:
 - [GND] GND (Black)
 - [GP2] ID1 (Blue)
 - [GP3] ID0 (Yellow)
-- [5V]  5V  (Red)
+- [VBUS]  5V  (Red)
 
 Note: The colors might be different for your cable. I recommend checking the pinout using a voltmeter.
 
@@ -40,7 +40,7 @@ Another cable was observed to have the following pinout:
 - [GND] GND (Black)
 - [GP2] ID1 (Orange)
 - [GP3] ID0 (Red)
-- [5V]  5V  (Yellow)
+- [VBUS]  5V  (Yellow)
 
 If you would like to connect to your device over USB, cut a USB cable and connect its wires like this:
 - USB cable D+ (green)  -> L0p (color depends on your cable)
