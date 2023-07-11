@@ -272,6 +272,11 @@ int __not_in_flash_func(tamarin_tx_write_bare)(uint8_t request, uint32_t value) 
     return result;
 }
 
+// Flushing is required with tinyUSB 0.13 and above.
+#if (TUSB_VERSION_MAJOR == 0) && (TUSB_VERSION_MINOR <= 12)
+#define tud_vendor_flush(x) ((void)0)
+#endif
+
 bool probe_enabled = false;
 void probe_handle_pkt(void) {
     struct tamarin_cmd_hdr *cmd = &probe.probe_cmd;
@@ -284,12 +289,12 @@ void probe_handle_pkt(void) {
             tamarin_debug("Executing read\r\n");
             
             result = tamarin_tx_read_bare(cmd->request, &data);
-            tamarin_debug("Read: %d 0x%08X", result, data);
+            tamarin_debug("Read: %d 0x%08X\r\n", result, data);
             break;
         case TAMARIN_WRITE:
             tamarin_debug("Executing write\r\n");
             result = tamarin_tx_write_bare(cmd->request, cmd->data);
-            tamarin_debug("Wrrite: %d 0x%08X", result, cmd->data);
+            tamarin_debug("Write: %d 0x%08X\r\n", result, cmd->data);
             break;
         case TAMARIN_LINE_RESET:
             tamarin_debug("Executing line reset\r\n");
@@ -312,6 +317,7 @@ void probe_handle_pkt(void) {
 
 
     tud_vendor_write((char*)&res, sizeof(res));
+    tud_vendor_flush();
 }
 
 // USB bits
