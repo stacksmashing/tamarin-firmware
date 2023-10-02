@@ -28,6 +28,8 @@
 #define PIN_SDQ 3
 
 volatile bool serialEnabled = false;
+volatile bool jtagInited = false;
+volatile bool jtagEnabled = false;
 
 void configure_rx(PIO pio, uint sm) {
     pio_sm_set_enabled(pio, sm, false);
@@ -37,8 +39,16 @@ void configure_rx(PIO pio, uint sm) {
 }
 
 void leave_dcsd() {
-    uart_deinit(uart0);
     serialEnabled = false;
+    
+    uart_deinit(uart0);
+}
+
+void leave_jtag() {
+    jtagEnabled = false;
+    jtagInited  = false;
+    
+    tamarin_probe_deinit();
 }
 
 void lightning_send_wake() {
@@ -54,8 +64,8 @@ void lightning_send_wake() {
 }
 
 void tamarin_reset_tristar(PIO pio, uint sm) {
-    tamarin_probe_deinit();
     leave_dcsd();
+    leave_jtag();
     
     lightning_send_wake();
     
@@ -162,11 +172,13 @@ void dcsd_mode(PIO pio, uint sm) {
 void jtag_mode(PIO pio, uint sm) {
     set_idbus_high_impedance();
     pio_sm_set_enabled(pio, sm, false);
-    tamarin_probe_init();
     serprint("JTAG mode active, ID pin in Hi-Z.\r\n");
     serprint("You can now connect with an SWD debugger.\r\n");
     serprint("Please note: Reset/Reset to DFU will be unavailable until\r\n");
     serprint("the device is rebooted or the cable is re-plugged.\r\n");
+    
+    jtagInited  = false;
+    jtagEnabled = true;
 }
 
 uint8_t crc_data(const uint8_t *data, size_t len) {
@@ -335,7 +347,7 @@ void output_state_machine() {
                 break;
                 
             case HANDLE_JTAG:
-                tamarin_probe_task();
+                // Nothing to do
                 break;
                 
             case FORCE_JTAG:
@@ -438,6 +450,16 @@ int main() {
             if (tud_cdc_n_available(ITF_DCSD)) {
                 uart_putc_raw(uart0, tud_cdc_n_read_char(ITF_DCSD));
             }
+        }
+        
+        if (jtagEnabled) {
+            if (!jtagInited) {
+                tamarin_probe_init();
+                tud_task();
+                jtagInited = true;
+            }
+            
+            tamarin_probe_task();
         }
     }
 }

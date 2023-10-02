@@ -311,7 +311,11 @@ void probe_handle_pkt(void) {
     res.res = result;
 
 
+    tud_task();
     tud_vendor_write((char*)&res, sizeof(res));
+    tud_task();
+    tud_vendor_flush();
+    tud_task();
 }
 
 // USB bits
