@@ -30,6 +30,7 @@
 volatile bool serialEnabled = false;
 volatile bool jtagInited = false;
 volatile bool jtagEnabled = false;
+volatile bool wantLeaveJtag = false;
 
 void configure_rx(PIO pio, uint sm) {
     pio_sm_set_enabled(pio, sm, false);
@@ -47,16 +48,17 @@ void leave_dcsd() {
 void leave_jtag() {
     jtagEnabled = false;
     jtagInited  = false;
-    
+
     tamarin_probe_deinit();
+    wantLeaveJtag = false;
 }
 
 void lightning_send_wake() {
     gpio_init(PIN_SDQ);
     gpio_set_dir(PIN_SDQ, GPIO_OUT);
     gpio_put(PIN_SDQ, 0);
-    
-    sleep_us(20);
+
+    sleep_us(200);
     
     gpio_set_dir(PIN_SDQ, GPIO_IN);
     
@@ -65,7 +67,8 @@ void lightning_send_wake() {
 
 void tamarin_reset_tristar(PIO pio, uint sm) {
     leave_dcsd();
-    leave_jtag();
+    wantLeaveJtag = true;
+    while (wantLeaveJtag);
     
     lightning_send_wake();
     
@@ -91,7 +94,8 @@ enum state {
     HANDLE_JTAG,
     // Force JTAG mode if the cable is already in JTAG mode
     // (e.g. after the tamarin cable was reset but not the device)
-    FORCE_JTAG
+    FORCE_JTAG,
+    FORCE_SPAM
 };
 
 volatile enum state gState = RESTART_ENUMERATION;
@@ -108,6 +112,7 @@ enum command {
 enum default_command {
     DEFAULT_CMD_DCSD = 0,
     DEFAULT_CMD_JTAG,
+    DEFAULT_CMD_SPAM,
     DEFAULT_CMD_CHARGING
 };
 
@@ -121,6 +126,8 @@ enum command gCommand = CMD_DEFAULT;
 enum responses {
     // JTAG mode
     RSP_USB_UART_JTAG,
+    // JTAG mode
+    RSP_USB_SPAM_JTAG,
     // DCSD mode
     RSP_USB_UART,
     // Reset
@@ -141,6 +148,7 @@ enum TRISTAR_REQUESTS {
 // hex(pwnlib.util.crc.generic_crc(b"\x75\x00\x00\x02\x00\x00\x00", 0x31, 8, 0xff, True, True, False))
 const uint8_t bootloader_response[RSP_MAX][7] = {
     [RSP_USB_UART_JTAG] = {0x75, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00},
+    [RSP_USB_SPAM_JTAG] = {0x75, 0xa0, 0x08, 0x10, 0x00, 0x00, 0x00},
     [RSP_USB_UART] = {0x75, 0x20, 0x00, 0x10, 0x00, 0x00, 0x00},
     [RSP_RESET] = {0x75, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00},
     [RSP_DFU] = {0x75, 0x20, 0x00, 0x02, 0x00, 0x00, 0x00},
@@ -174,8 +182,6 @@ void jtag_mode(PIO pio, uint sm) {
     pio_sm_set_enabled(pio, sm, false);
     serprint("JTAG mode active, ID pin in Hi-Z.\r\n");
     serprint("You can now connect with an SWD debugger.\r\n");
-    serprint("Please note: Reset/Reset to DFU will be unavailable until\r\n");
-    serprint("the device is rebooted or the cable is re-plugged.\r\n");
     
     jtagInited  = false;
     jtagEnabled = true;
@@ -315,6 +321,12 @@ void output_state_machine() {
                                 respond_lightning(pio, sm, bootloader_response[RSP_USB_UART_JTAG], 7);
                                 gState = FORCE_JTAG;
                                 continue;
+
+                            case DEFAULT_CMD_SPAM:
+                                respond_lightning(pio, sm, bootloader_response[RSP_USB_SPAM_JTAG], 7);
+                                gState = FORCE_SPAM;
+                                continue;
+
                             case DEFAULT_CMD_CHARGING:
                                 respond_lightning(pio, sm, bootloader_response[RSP_USB_A_CHARGING_CABLE], 7);
                                 serprint("Sent charging\r\n");
@@ -351,8 +363,9 @@ void output_state_machine() {
                 break;
                 
             case FORCE_JTAG:
-                jtag_mode(pio, sm);
                 dcsd_mode(pio, sm); // Also init serial
+            case FORCE_SPAM:
+                jtag_mode(pio, sm);
                 gState = HANDLE_JTAG;
                 break;
         }
@@ -367,7 +380,9 @@ void print_menu() {
     serprint("4: Reset and enter DFU mode (iPhone X and up only)\r\n");
     serprint("5: Reenumerate\r\n\r\n");
     serprint("F: Force JTAG mode without sending command\r\n");
+    serprint("J: Force SPAM-JTAG mode without sending command\r\n");
     serprint("R: Reset Tamarin cable\r\n");
+    serprint("S: SPAM mode (Apple Watch UART)\r\n");
     serprint("U: Go into firmware update mode\r\n");
     serprint("> ");
 }
@@ -410,9 +425,22 @@ void shell_task() {
                 gDefaultCommand = DEFAULT_CMD_JTAG;
                 gState = FORCE_JTAG;
                 break;
+            case 'j':
+            case 'J':
+                serprint("\r\nForcing SPAM mode.\r\n");
+                gDefaultCommand = DEFAULT_CMD_SPAM;
+                gState = FORCE_SPAM;
+                break;
             case 'R':
             case 'r':
                 watchdog_enable(100, 1);
+                break;
+            case 's':
+            case 'S':
+                serprint("\r\nEnabling SPAM mode.\r\n");
+                gCommand = CMD_DEFAULT;
+                gDefaultCommand = DEFAULT_CMD_SPAM;
+                gState = RESTART_ENUMERATION;
                 break;
             case 'U':
             case 'u':
@@ -452,6 +480,9 @@ int main() {
             }
         }
         
+        tud_task();
+        tud_vendor_flush();
+        tud_task();
         if (jtagEnabled) {
             if (!jtagInited) {
                 tamarin_probe_init();
@@ -459,7 +490,13 @@ int main() {
                 jtagInited = true;
             }
             
-            tamarin_probe_task();
+            tamarin_probe_task(!serialEnabled);
+        }
+        tud_task();
+        tud_vendor_flush();
+        tud_task();
+        if (wantLeaveJtag){
+            leave_jtag();
         }
     }
 }

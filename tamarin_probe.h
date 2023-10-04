@@ -27,7 +27,7 @@
 #ifndef PROBE_H_
 #define PROBE_H_
 
-void tamarin_probe_task(void);
+void tamarin_probe_task(int doSPAM);
 void tamarin_probe_init(void);
 void tamarin_probe_deinit(void);
 
