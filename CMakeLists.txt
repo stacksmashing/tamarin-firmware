@@ -3,7 +3,9 @@ cmake_minimum_required(VERSION 3.13)
 # note: this must happen before project()
 include(pico_sdk_import.cmake)
 project(tamarin_firmware)
- 
+
+# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -ggdb")
+
 pico_sdk_init()
 
 add_executable(tamarin_firmware)

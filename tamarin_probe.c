@@ -29,6 +29,60 @@ enum TAMARIN_CMDS {
     TAMARIN_SET_FREQ = 4
 };
 
+#define SWD_RSP_OK      0b001
+#define SWD_RSP_WAIT    0b010
+#define SWD_RSP_FAULT   0b100
+
+static int gDPIDR = 0;
+static int gOrigSEL = 0;
+
+#define BITS_ALWYS  0x81
+
+#define BITS_AP     (1<<1)
+#define BITS_DP     (0<<1)
+
+#define BITS_RD     (1<<2)
+#define BITS_WR     (0<<2)
+
+#define PARITY(i)   (i<<5)
+
+#define BITS_DP_IDCODE  (0b00 << 3)
+#define BITS_DP_ABORT   (0b00 << 3)
+#define BITS_DP_CTRL    (0b01 << 3)
+#define BITS_DP_RESEND  (0b10 << 3)
+#define BITS_DP_SELECT  (0b10 << 3)
+#define BITS_DP_RDBUFF  (0b11 << 3)
+
+#define BITS_AP_CSW     (0b00 << 3)
+#define BITS_AP_TAR     (0b01 << 3)
+#define BITS_AP_DRW     (0b11 << 3)
+
+#define BITS_DP_READ(addr) (((addr) == 0 || ((addr)>>3) == 3) ? PARITY(1) : PARITY(0)) | addr | BITS_RD | BITS_DP | BITS_ALWYS
+#define BITS_DP_WRITE(addr) (((addr) == 0 || ((addr)>>3) == 3) ? PARITY(0) : PARITY(1)) | addr | BITS_WR | BITS_DP | BITS_ALWYS
+
+#define BITS_AP_READ(addr) (((addr) == 0 || ((addr)>>3) == 3) ? PARITY(0) : PARITY(1)) | addr | BITS_RD | BITS_AP | BITS_ALWYS
+#define BITS_AP_WRITE(addr) (((addr) == 0 || ((addr)>>3) == 3) ? PARITY(1) : PARITY(0)) | addr | BITS_WR | BITS_AP | BITS_ALWYS
+
+#define SWD_DP_read_IDCODE(val)   tamarin_tx_read_bare(BITS_DP_READ(BITS_DP_IDCODE),val)
+#define SWD_DP_read_CTRL(val)     tamarin_tx_read_bare(BITS_DP_READ(BITS_DP_CTRL),val)
+#define SWD_DP_read_RESEND(val)   tamarin_tx_read_bare(BITS_DP_READ(BITS_DP_RESEND),val)
+#define SWD_DP_read_RDBUFF(val)   tamarin_tx_read_bare(BITS_DP_READ(BITS_DP_RDBUFF),val)
+
+#define SWD_DP_write_ABORT(val)  tamarin_tx_write_bare(BITS_DP_WRITE(BITS_DP_ABORT),val)
+#define SWD_DP_write_CTRL(val)   tamarin_tx_write_bare(BITS_DP_WRITE(BITS_DP_CTRL),val)
+#define SWD_DP_write_SELECT(val) tamarin_tx_write_bare(BITS_DP_WRITE(BITS_DP_SELECT),val)
+
+#define SWD_AP_read_CSW(val) tamarin_tx_read_bare(BITS_AP_READ(BITS_AP_CSW),val)
+#define SWD_AP_read_TAR(val) tamarin_tx_read_bare(BITS_AP_READ(BITS_AP_TAR),val)
+#define SWD_AP_read_DRW(val) tamarin_tx_read_bare(BITS_AP_READ(BITS_AP_DRW),val)
+
+#define SWD_AP_write_CSW(val) tamarin_tx_write_bare(BITS_AP_WRITE(BITS_AP_CSW),val)
+#define SWD_AP_write_TAR(val) tamarin_tx_write_bare(BITS_AP_WRITE(BITS_AP_TAR),val)
+#define SWD_AP_write_DRW(val) tamarin_tx_write_bare(BITS_AP_WRITE(BITS_AP_DRW),val)
+
+
+#define SWD_DP_clear_error() SWD_DP_write_ABORT(0x1e)
+
 // This struct is the direct struct that is sent to
 // the probe.
 struct __attribute__((__packed__)) tamarin_cmd_hdr {
@@ -154,10 +208,13 @@ void tamarin_probe_init() {
     // Set up divisor
     probe_set_swclk_freq(1000);
 
+    gDPIDR = 0;
+    gOrigSEL = -1;
     tamarin_start_probe();
 }
 
 void tamarin_probe_deinit() {
+    gDPIDR = 0;
     pio_sm_set_enabled(pio0, PROBE_SM, false);
     pio_clear_instruction_memory(pio0);
     gpio_disable_pulls(PROBE_PIN_SWDIO);
@@ -181,7 +238,7 @@ void tamarin_line_reset() {
 int __not_in_flash_func(tamarin_tx_read_bare)(uint8_t request, uint32_t *value) {
 
     // uint8_t data_reversed = reverse(request);
-    uint32_t result;
+    uint32_t result = request;
     for(int i=0; i < 5; i++) {
         serprint("Read loop");
         probe_write_mode();
@@ -224,7 +281,7 @@ int __not_in_flash_func(tamarin_tx_read_bare)(uint8_t request, uint32_t *value) 
 
 int __not_in_flash_func(tamarin_tx_write_bare)(uint8_t request, uint32_t value) {
     uint32_t value_parity = __builtin_parity(value);
-    uint32_t result;
+    uint32_t result = request;
     for(int i=0; i < 5; i++) {
         serprint("Write loop");
         probe_write_mode();
@@ -278,7 +335,7 @@ void probe_handle_pkt(void) {
 
     tamarin_debug("Processing packet: ID: %u Command: %u Request: 0x%02X Data: 0x%08X Idle: %d\r\n", cmd->id, cmd->cmd, cmd->request, cmd->data, cmd->idle_cycles);
     int result = 0;
-    uint32_t data;
+    uint32_t data = 0;
     switch(cmd->cmd) {
         case TAMARIN_READ:
             tamarin_debug("Executing read\r\n");
@@ -288,6 +345,9 @@ void probe_handle_pkt(void) {
             break;
         case TAMARIN_WRITE:
             tamarin_debug("Executing write\r\n");
+            if (cmd->request == BITS_DP_WRITE(BITS_DP_SELECT)){
+                gOrigSEL = cmd->data;
+            }
             result = tamarin_tx_write_bare(cmd->request, cmd->data);
             tamarin_debug("Wrrite: %d 0x%08X", result, cmd->data);
             break;
@@ -310,12 +370,97 @@ void probe_handle_pkt(void) {
     res.data = data;
     res.res = result;
 
-
     tud_vendor_write((char*)&res, sizeof(res));
 }
 
+int SWD_readmem(uint32_t addr, uint32_t *data){
+    int result = 0;
+    result = SWD_AP_write_TAR(addr);
+    if (result != SWD_RSP_OK) goto cleanup;
+
+    result = SWD_AP_read_DRW(data);
+    if (result != SWD_RSP_OK) goto cleanup;
+
+    result = SWD_DP_read_RDBUFF(data);
+    if (result != SWD_RSP_OK) goto cleanup;
+cleanup:;
+    return result;
+}
+
+void handle_SPAM(void){
+    int result = 0;
+    uint32_t data = 0;
+    int hasdata = 0;
+    if (!gDPIDR){
+        probe_set_swclk_freq(1000);
+        tamarin_line_reset();
+        SWD_DP_clear_error();
+        result = SWD_DP_read_IDCODE(&data);
+        if (data != 0 && result == SWD_RSP_OK){
+            gDPIDR = data;
+            result = SWD_DP_write_CTRL(0x50000000);
+        }
+    }else{
+        uint32_t uart_ctrl_reg = 0;
+        if (gDPIDR == 0x5ba02477){
+            //s7002
+            uart_ctrl_reg = 0xc6e00004;
+        }else if (gDPIDR == 0x4ba02477){
+            //s8002
+            uart_ctrl_reg = 0xC83B401C;
+        }
+
+        if (uart_ctrl_reg){
+            result = SWD_DP_clear_error();
+            if (result != SWD_RSP_OK) goto cleanup;
+
+            if (gOrigSEL != 0x01000000){
+                result = SWD_DP_write_SELECT(0x01000000);
+                if (result != SWD_RSP_OK) goto cleanup;
+                if (gOrigSEL == -1) gOrigSEL = 0x01000000;
+            }
+
+            result = SWD_AP_write_CSW(0xA2000012);
+            if (result != SWD_RSP_OK) goto cleanup;
+
+
+            int cnt = 1;
+            uint32_t payload = 0;
+
+            while (cnt > 0){
+                result = SWD_readmem(uart_ctrl_reg + 0x00,&data);
+                if (result != SWD_RSP_OK) goto cleanup;
+                cnt = data & 0x7f;
+                if (!cnt) break;
+                hasdata = 1;
+                tud_cdc_n_write_char(ITF_DCSD, data >> 8);
+                cnt--;
+                result = SWD_readmem(uart_ctrl_reg + 0x0C,&payload);
+                if (result != SWD_RSP_OK) goto cleanup;
+                int sendSize = cnt > sizeof(payload) ? sizeof(payload) : cnt;
+                tud_cdc_n_write(ITF_DCSD, &payload, sendSize);
+            }
+
+        cleanup:;
+            if (result == SWD_RSP_FAULT){
+                data = 0;
+                result = SWD_DP_read_CTRL(&data);
+                if (result == 99) return;
+            }
+            if (gOrigSEL != 0x01000000){
+                result = SWD_RSP_WAIT;
+                for (int i=0; i<100 && result == SWD_RSP_WAIT; i++){
+                    result = SWD_DP_write_SELECT(gOrigSEL);
+                }
+            }
+        }
+    }
+    if (hasdata) tud_cdc_n_write_flush(ITF_DCSD);
+    return;
+}
+
 // USB bits
-void tamarin_probe_task(void) {
+void tamarin_probe_task(int doSPAM) {
     if ( tud_vendor_available() ) {
         char tmp_buf[64];
         uint count = tud_vendor_read(tmp_buf, 64);
@@ -326,4 +471,5 @@ void tamarin_probe_task(void) {
         memcpy(&probe.probe_cmd, tmp_buf, sizeof(struct tamarin_cmd_hdr));
         probe_handle_pkt();
     }
+    if (doSPAM) handle_SPAM();
 }
