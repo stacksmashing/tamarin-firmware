@@ -1,19 +1,36 @@
 # Tamarin Firmware
 ![Tamarin Logo](https://github.com/stacksmashing/tamarin-firmware/blob/main/media/tamarin-logo-300.png?raw=true)
 
-## PICO SDK NOTE
+## Building
+The following steps are also condensed in a shell script that you may run like this:
 
-Please build with the Pico-SDK Version 4fe995d0ec984833a7ea9c33bac5c67a53c04178
+```
+./build.sh
+```
 
-Newer versions have some USB incompatibility.
+### Prerequisite: Building the Raspberry Pi Pico SDK
+Please make sure to build with the Pico-SDK Version `4fe995d0ec984833a7ea9c33bac5c67a53c04178`. Newer versions have some USB incompatibility.
 
-## Build
+To build the Pico-SDK under the `tamarin-firmware` directory, you may run:
+
+```
+git clone https://github.com/raspberrypi/pico-sdk
+cd pico-sdk
+git checkout 4fe995d0ec984833a7ea9c33bac5c67a53c04178
+git submodule update --init
+cd ..
+export PICO_SDK_PATH=`pwd`/pico-sdk/
+```
+
+Then you can proceed to the next step of building `tamarin-firmware`
+
+### Building `tamarin-firmware`
 
 ```
 mkdir build
 cd build
 cmake ..
-make
+make -j$(nproc)
 ```
 
 ## Hooking it up
